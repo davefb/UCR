@@ -1,6 +1,6 @@
 ﻿; ======================================================================== MAIN CLASS ===============================================================
 Class _UCR {
-	Version := "0.1.11"				; The version of the main application
+	Version := "0.1.16"				; The version of the main application
 	SettingsVersion := "0.0.7"		; The version of the settings file format
 	_StateNames := {0: "Normal", 1: "InputBind", 2: "GameBind"}
 	_State := {Normal: 0, InputBind: 1, GameBind: 2}
@@ -45,6 +45,7 @@ Class _UCR {
 		Gui +HwndHwnd
 		this.hwnd := hwnd
 		
+		this.SplashScreen(1)
 		; We need this on so we can work out the size of the various panes before they are shown.
 		DetectHiddenWindows, On
 
@@ -145,6 +146,7 @@ Class _UCR {
 		this._MessageFilterThread.ahkExec["new MessageFilter(" ObjShare(this._OnSize.Bind(this)) "," &matchobj "," &filterobj ")"]
 		matchobj.msg := 0x3
 		this._MessageFilterThread.ahkExec["new MessageFilter(" ObjShare(this._OnMove.Bind(this)) "," &matchobj "," &filterobj ")"]
+		this.SplashScreen(0)
 	}
 	
 	GuiClose(hwnd){
@@ -268,6 +270,23 @@ Class _UCR {
 		Gui, % this.hwnd ":+Minsize" rect.w "x" rect.h
 	}
 	
+	SplashScreen(state){
+		static SplashHwnd := 0
+		if (state){
+			if (!SplashHwnd){
+				Gui, new, +HwndHwnd
+				Gui, Font, s40, Verdana
+				Gui, -Caption
+				Gui, Add, Text, Center, UCR is Loading
+				Gui, Show
+				SplashHwnd := hwnd
+			}
+		} else {
+			Gui, % SplashHwnd ":Destroy"
+			SplashHwnd := 0
+		}
+	}
+	
 	; Creates the objects for the Main Menu
 	_CreateMainMenu(){
 		this.MainMenu := new _Menu()
@@ -275,6 +294,10 @@ Class _UCR {
 			.AddMenuItem("&Start Minimized", "StartMinimized", this._MenuHandler.Bind(this, "StartMinimized"))
 			.parent.AddMenuItem("&Minimize to Tray", "MinimizeToTray", this._MenuHandler.Bind(this, "MinimizeToTray"))
 		this.IOClassMenu := this.MainMenu.AddSubMenu("&IOClasses", "IOClasses")
+		this.MainMenu.AddSubMenu("&Links", "Links")
+			.AddMenuItem("&Github Page", "GithubPage", this._MenuHandler.Bind(this, "GithubPage"))
+			.parent.AddMenuItem("&Forum Thread", "ForumThread", this._MenuHandler.Bind(this, "ForumThread"))
+			.parent.AddMenuItem("&OneSwitch.org.uk (Accessible Gaming)", "OneSwitch", this._MenuHandler.Bind(this, "OneSwitch"))
 		Gui, % this.hwnd ":Menu", % this.MainMenu.id
 	}
 	
@@ -295,6 +318,18 @@ Class _UCR {
 		if (name = "MinimizeToTray" || name = "StartMinimized"){
 			this.UserSettings.MinimizeOptions[name] := !this.UserSettings.MinimizeOptions[name]
 			this.MainMenu.MenusByName["View"].ItemsByName[name].ToggleCheck()
+		}
+
+		if (name = "GithubPage"){
+			run, https://github.com/evilC/UCR
+		}
+
+		if (name = "ForumThread"){
+			run, https://autohotkey.com/boards/viewtopic.php?f=19&t=12249
+		}
+
+		if (name = "OneSwitch"){
+			run, http://oneswitch.org.uk/
 		}
 
 		/*
@@ -643,7 +678,7 @@ Class _UCR {
 	
 	; User clicked add new profile button
 	_AddProfile(parent := 0){
-		name := this._GetProfileName()
+		name := this._GetProfileName("Profile")
 		if (name = 0)
 			return
 		id := this._CreateProfile(name, 0, parent)
@@ -654,11 +689,60 @@ Class _UCR {
 		this.UpdateProfileToolbox()
 		this.ChangeProfile(id)
 	}
+
+	; Copies profile and adds new GUID's
+	_CopyProfile(id){
+		
+		; Get profile configuration
+		profile := this.Profiles[id]._Serialize()
+
+		newPluginOrder := []
+		newPlugins := {}
+
+		; Generate new GUIDs for plugins
+		Loop % profile.PluginOrder.length() {
+			id := profile.PluginOrder[A_Index]
+			newId := CreateGUID()
+			newPluginOrder[A_Index] := newId
+			newPlugins[newId] := profile.Plugins[id]
+		}
+
+		; Assign the new plugins and order 
+		profile.PluginOrder := newPluginOrder
+		profile.Plugins := newPlugins
+
+		name := this._GetProfileName(profile.Name " Copy", "Copy Profile")
+
+		if (!name){
+			return 0
+		}
+
+		; Create the new profile
+		newPID := this._CreateProfile(name, 0, profile.ParentProfile)
+		
+		; Set the new profile ID
+		profile.id := newPID
+
+		; Load the copied profile
+		this.Profiles[newPID]._Deserialize(profile)
+		
+		this.Profiles[newPID]._Hide()
+
+		; Add the new profile to the profiletree view
+		if (!IsObject(this.ProfileTree[profile.ParentProfile]))
+			this.ProfileTree[profile.ParentProfile] := []
+		this.ProfileTree[profile.ParentProfile].push(newPID)
+		
+		; Change profile and save
+		this.ChangeProfile(newId, 1)
+		this.UpdateProfileToolbox()
+		return 1
+	}
 	
 	RenameProfile(id){
 		if (!ObjHasKey(this.Profiles, id))
 			return 0
-		name := this._GetProfileName()
+		name := this._PromptForProfileName(this.Profiles[id].Name, "Rename Profile")
 		if (name = 0)
 			return 0
 		this.Profiles[id].Name := name
@@ -937,7 +1021,7 @@ Class _UCR {
 	
 	; Bind Mode ended. Pass the Primitive BindObject and it's IOClass back to the GuiControl that requested the binding
 	_BindModeEnded(callback, primitive){
-		;OutputDebug % "UCR| UCR: Bind Mode Ended. Binding[1]: " primitive.Binding[1] ", DeviceID: " primitive.DeviceID ", IOClass: " this.SelectedBinding.IOClass
+		OutputDebug % "UCR| Bind Mode Ended. Binding[1]: " primitive.Binding[1] ", DeviceID: " primitive.DeviceID ", IOClass: " this.SelectedBinding.IOClass
 		this.ChangeProfile(this.CurrentPID, 0)	; Do not save on change profile, bind mode will already cause a save
 		this._CurrentState := this._State.Normal
 		callback.Call(primitive)
@@ -981,26 +1065,40 @@ Class _UCR {
 	}
 	
 	; Picks a suggested name for a new profile, and presents user with a dialog box to set the name of a profile
-	_GetProfileName(){
-		c := 1
-		found := 0
-		while (!found){
-			found := 1
+	_GetProfileName(base_name, title := "Add Profile"){
+		suggestedname := this._GetNextProfile(base_name)
+		return this._PromptForProfileName(suggestedname, title)
+	}
+	
+	_PromptForProfileName(suggestedname, title){
+		; Allow user to pick name
+		windowTitle := title
+		prompt := "Enter a name for the Profile"
+		coords := this.GetCenteredCoordinates(375, 130)
+		InputBox, name, % windowTitle, % prompt, ,,130,% coords.x,% coords.y,,, % suggestedname
+		
+		return (ErrorLevel ? 0 : name)
+	}
+	
+	; Works out the next number in order for a profile name
+	_GetNextProfile(name){
+		num := 1
+		Loop {
+			candidate_name := name " " num
+			already_exists := 0
 			for id, profile in this.Profiles {
-				if (profile.Name = "Profile " c){
-					c++
-					found := 0
+				if (profile.Name = candidate_name){
+					already_exists := 1
 					break
 				}
 			}
+			if (already_exists){
+				num++
+			} else {
+				break
+			}
 		}
-		suggestedname := "Profile " c
-		; Allow user to pick name
-		prompt := "Enter a name for the Profile"
-		coords := this.GetCenteredCoordinates(375, 130)
-		InputBox, name, Add Profile, % prompt, ,,130,% coords.x,% coords.y,,, % suggestedname
-		
-		return (ErrorLevel ? 0 : name)
+		return candidate_name
 	}
 	
 	; Positions the specified window in the middle of the UCR GUI
@@ -1081,6 +1179,9 @@ Class _UCR {
 			#Include Classes\GuiControls\InputDelta.ahk
 			#Include Classes\GuiControls\OutputButton.ahk
 			#Include Classes\GuiControls\OutputAxis.ahk
+			#Include Classes\GuiControls\AxisPreview.ahk
+			#Include Classes\GuiControls\ButtonPreview.ahk
+			#Include Classes\GuiControls\ButtonPreviewThin.ahk
 		}
 		
 		class IOClasses {
